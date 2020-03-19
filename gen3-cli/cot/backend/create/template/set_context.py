@@ -39,9 +39,9 @@ def set_context(
     e.CACHE_DIR = os.path.join(e.GENERATION_DATA_DIR, 'cache')
     os.makedirs(e.CACHE_DIR, exist_ok=True)
 
-    l.TEMPLATE_COMPOSITES = ('account', 'fragment')
+    e.TEMPLATE_COMPOSITES = ('account', 'fragment')
 
-    for composite in l.TEMPLATE_COMPOSITES:
+    for composite in e.TEMPLATE_COMPOSITES:
         key = f'COMPOSITE_{composite.upper()}'
         e[key] = os.path.join(e.CACHE_DIR, f'{key.lower()}.ftl')
 
@@ -106,7 +106,7 @@ def set_context(
     # Build the composite solution ( aka blueprint)
     e.GENERATION_INPUT_SOURCE = e.GENERATION_INPUT_SOURCE or 'composite'
     if e.GENERATION_INPUT_SOURCE == 'composite':
-        l.blueprint_alternate_dirs = (
+        e.blueprint_alternate_dirs = (
             e.SEGMENT_SOLUTIONS_DIR,
             e.ENVIRONMENT_SHARED_SOLUTIONS_DIR,
             e.SEGMENT_SHARED_SOLUTIONS_DIR,
@@ -119,7 +119,7 @@ def set_context(
             or not os.path.isfile(e.COMPOSITE_BLUEPRINT)
         ):
             l.blueprint_array = []
-            for blueprint_alternate_dir in l.blueprint_alternate_dirs:
+            for blueprint_alternate_dir in e.blueprint_alternate_dirs:
                 if not blueprint_alternate_dir or not os.path.isdir(blueprint_alternate_dir):
                     continue
                 l.blueprint_array += Search.match_files(

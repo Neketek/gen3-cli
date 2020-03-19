@@ -82,18 +82,38 @@ class Search:
         return os.path.join(*path)
 
     @staticmethod
-    def match(*patterns, root=None):
+    def match(*patterns, root=None, include=None, exclude=None):
+
         root = root or os.getcwd()
         root = pathlib.Path(root)
+
+        include = include or tuple()
+        exclude = exclude or tuple()
+
+        def inlcude_filters(path):
+            for filter in include:
+                if not path.match(filter):
+                    return False
+            return True
+
+        def exclude_filters(path):
+            for filter in exclude:
+                if path.match(filter):
+                    return False
+            return True
+
         matches = []
         for pattern in patterns:
             matches_gen = root.glob(pattern)
-            matches += [str(match) for match in matches_gen]
+            for path in matches_gen:
+                if inlcude_filters(path) and exclude_filters(path):
+                    matches.append(str(path))
+
         # removing duplicates
         return list(set(matches))
 
-    def match_dirs(*patterns, root=None, include_file_dirs=False):
-        matches = Search.match(*patterns, root=root)
+    def match_dirs(*patterns, root=None, include_file_dirs=False, include=None, exclude=None):
+        matches = Search.match(*patterns, root=root, include=include, exclude=exclude)
         filtered_matches = []
         for match in matches:
             if os.path.isfile(match):
@@ -104,8 +124,8 @@ class Search:
         # removing duplicates
         return list(set(filtered_matches))
 
-    def match_files(*patterns, root=None):
-        matches = Search.match(*patterns, root=root)
+    def match_files(*patterns, root=None, include=None, exclude=None):
+        matches = Search.match(*patterns, root=root, include=include, exclude=exclude)
         return [match for match in matches if os.path.isfile(match)]
 
     def list_all(dirname):

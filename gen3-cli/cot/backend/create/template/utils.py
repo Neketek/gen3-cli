@@ -1,4 +1,5 @@
 import re
+import json
 from cot.loggers import logging
 
 
@@ -12,6 +13,14 @@ def deep_dict_update(a, b):
             deep_dict_update(a_value, b_value)
         else:
             a[b_key] = b_value
+
+
+def deep_dict_update_json_files(files):
+    data = {}
+    for filename in files:
+        with open(filename, 'rt') as f:
+            deep_dict_update(data, json.load(f))
+    return data
 
 
 # -- semver handling --
@@ -126,3 +135,17 @@ def semver_upgrade_list(upgrade_list, maximum_version):
         if semver_compare(maximum_version, upgrade_list[i]) < 0:
             return upgrade_list[:i]
     return upgrade_list
+
+
+def add_json_ancestor_objects(filename, ancestors):
+    with open(filename, 'rt') as f:
+        data = json.load(f)
+    result = None
+    for ancestor in ancestors[::-1]:
+        if not ancestor:
+            continue
+        if not result:
+            result = {ancestor: data}
+        else:
+            result = {ancestor: result}
+    return result
