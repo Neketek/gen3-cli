@@ -1,5 +1,5 @@
 import os
-import tempfile
+import pathlib
 import filecmp
 import re
 import json
@@ -1169,68 +1169,61 @@ def convert_files_to_json_object(
     prefixes = prefixes or tuple()
     files = files or tuple()
 
-    temp_dir = tempfile.mkdtemp()
-    base_file = os.path.join(temp_dir, 'base.json')
-    processed_files = [base_file]
-    with open(base_file, 'wt+') as f:
-        f.write('{}')
+    object_parts = []
 
     for filename in files:
+
         basename = os.path.basename(filename)
         dirname = os.path.dirname(filename)
-        # abspath = os.path.abspath(filename)
         relpath = os.path.relpath(filename, root_dir)
         name, ext = os.path.splitext(basename)
 
-        source_file = filename
         attribute = name.replace('-', '_')
+        part = {}
 
         if as_file:
-            source_file = tempfile.mktemp('.json', f'asfile_{attribute.lower()}_', temp_dir)
-            with open(source_file, 'wt+') as f:
-                json.dump(f, {
-                    attribute.upper(): {
-                        'Value': basename,
-                        'AsFile': relpath
-                    }
-                })
+            part = {
+                attribute.upper(): {
+                    'Value': basename,
+                    'AsFile': relpath
+                }
+            }
         else:
             if ext == 'json':
-                pass
+                with open(filename, 'rt') as f:
+                    part = json.load(f)
             elif ext == 'escjson':
-                source_file = tempfile.mktemp('.json', f'escjson_{attribute.lower()}_', temp_dir)
-                with open(source_file, 'wt+') as f:
-                    with open(filename, 'rt') as data_file:
-                        data = data_file.read()
-                    json.dump(f, {
-                        attribute.upper(): {
-                            'Value': data,
-                            'FromFile': relpath
-                        }
-                    })
+                with open(filename, 'rt') as source:
+                    data = source.read()
+                part = {
+                    attribute.upper(): {
+                        'Value': data,
+                        'FromFile': relpath
+                    }
+                }
             else:
                 # Assume raw input
-                source_file = tempfile.mktemp('.json', f'raw_{attribute.lower()}', temp_dir)
-                with open(source_file, 'wt+') as f:
-                    with open(filename, 'rt') as data_file:
-                        data = json.load(data_file)
-                    json.dump(f, {
-                        attribute.upper(): {
-                            'Value': data,
-                            'FromFile': relpath
-                        }
-                    })
-        file_ancestors = (*prefixes, dirname.replace('./', " "))
-        processed_file = tempfile.mktemp('.json', 'processed_', temp_dir)
-        with open(processed_file, 'wt+') as f:
-            json.dump(
-                f,
-                utils.add_json_ancestor_objects(source_file, (*base_ancestors, '-'.join(file_ancestors).lower()))
-            )
-        processed_files.append(processed_file)
-    result = utils.deep_dict_update_json_files(processed_files)
-    shutil.rmtree(temp_dir)
-    return result
+                with open(filename, 'rt') as source:
+                    data = json.load(source)
+                part = {
+                    attribute.upper(): {
+                        'Value': data,
+                        'FromFile': relpath
+                    }
+                }
+        file_ancestors = (*prefixes, *pathlib.Path(dirname).parts)
+        part_ancestors = (*base_ancestors, '-'.join(file_ancestors).lower())
+        processed_part = None
+        for ancestor in part_ancestors[::-1]:
+            if not ancestor:
+                continue
+            if not processed_part:
+                processed_part = {ancestor: part}
+            else:
+                processed_part = {ancestor: processed_part}
+        object_parts.append(processed_part)
+
+    return utils.deep_merge_dict_list(object_parts)
 
 
 def assemble_settings(
@@ -1244,47 +1237,28 @@ def assemble_settings(
     # Defaults
     root_dir = root_dir or e.ROOT_DIR
     result_file = result_file or e.COMPOSITE_SETTINGS
-    temp_dir = tempfile.mkdtemp('', 'assemble_settings')
-    temp_file_list = []
+    settings_parts = []
 
-    account_files = Search.match_files(
-        '**/account.json',
-        root=root_dir,
-        exclude=['*/.*/*']
-    )
-    for account_file in account_files:
-        with open(account_file, 'rt') as f:
-            account = json.load(f).get('Account', {})
-        id = account.get('Id', '')
-        name = account.get('Name', '')
-        name = name or id
-        if e.ACCOUNT and e.ACCOUNT.lower() != name.lower():
-            continue
-        account_dir = os.path.join(os.path.dirname(account_file), 'settings')
-        logger.debug('Processing %s', account_dir)
-        temp_file = tempfile.mktemp('.json', 'account_settings_', temp_dir)
-        setting_files = Search.match_files('*.json', root=account_dir)
-        settings_data = convert_files_to_json_object(['Settings', 'Accounts'], name, root_dir, False, setting_files)
-        with open(temp_file, 'wt+') as f:
-            json.dump(f, settings_data)
-        temp_file_list.append(temp_file)
-
-    product_files = Search.match_files(
-        '**/product.json',
-        root=root_dir,
-        exclude=['**/.*/**']
-    )
-    for product_file in product_files:
+    def load_and_check_product(product_file):
         with open(product_file, 'rt') as f:
             product = json.load(f).get('Product', {})
         id = product.get('Id')
         name = product.get('Name')
         if not name:
             name = id
-        if e.PRODUCT and e.PRODUCT.lower() != name.lower():
-            continue
-        product_dir = os.path.join(os.path.dirname(product_file), 'settings')
-        # Settings
+        correct = e.PRODUCT and e.PRODUCT.lower() != name.lower()
+        return correct, id, name
+
+    def load_and_check_account(account_file):
+        with open(account_file, 'rt') as f:
+            account = json.load(f).get('Account', {})
+        id = account.get('Id', '')
+        name = account.get('Name', '')
+        name = name or id
+        correct = e.ACCOUNT and e.ACCOUNT.lower() != name.lower()
+        return correct, id, name
+
+    def load_product_settings(root, name):
         setting_files = Search.match_files(
             '*',
             exclude=(
@@ -1296,15 +1270,13 @@ def assemble_settings(
                 '.*',
                 '*/.*/*'
             ),
-            root=product_dir
+            root=root
         )
         if setting_files:
-            temp_file = tempfile.mktemp('.json', 'product_settings_', temp_dir)
             settings_data = convert_files_to_json_object(['Settings', 'Products'], name, root_dir, False, setting_files)
-            with open(temp_file, 'wt+') as f:
-                json.dump(f, settings_data)
-            temp_file_list.append(temp_file)
-        # Sensitive
+            settings_parts.append(settings_data)
+
+    def load_product_sensitive(root, name):
         setting_files = Search.match_files(
             '*credentials.json',
             '*sensitive.json',
@@ -1314,15 +1286,13 @@ def assemble_settings(
                 '.*',
                 '*/.*/*'
             ),
-            root=product_dir
+            root=root
         )
         if setting_files:
-            temp_file = tempfile.mktemp('.json', 'product_sensitive_', temp_dir)
             settings_data = convert_files_to_json_object(['Sensitive', 'Products'], name, root_dir, False, setting_files) # noqa
-            with open(temp_file, 'wt+') as f:
-                json.dump(f, settings_data)
-            temp_file_list.append(temp_file)
-        # Builds
+            settings_parts.append(settings_data)
+
+    def load_product_builds(root, name):
         setting_files = Search.match_files(
             '*build.json',
             exclude=(
@@ -1331,15 +1301,13 @@ def assemble_settings(
                 '.*',
                 '*/.*/*'
             ),
-            root=product_dir
+            root=root
         )
         if setting_files:
-            temp_file = tempfile.mktemp('.json', 'product_builds_', temp_dir)
             settings_data = convert_files_to_json_object(['Build', 'Products'], name, root_dir, False, setting_files)
-            with open(temp_file, 'wt+') as f:
-                json.dump(f, settings_data)
-            temp_file_list.append(temp_file)
-        # asFiles
+            settings_parts.append(settings_data)
+
+    def load_product_files(root, name):
         setting_files = Search.match_files(
             '*/asfile/*',
             '*/asFile/*',
@@ -1347,83 +1315,63 @@ def assemble_settings(
                 '.*',
                 '*/.*/*'
             ),
-            root=product_dir
+            root=root
         )
         if setting_files:
-            temp_file = tempfile.mktemp('.json', 'product_settings_asfile_', temp_dir)
             settings_data = convert_files_to_json_object(['Settings', 'Products'], name, root_dir, True, setting_files)
-            with open(temp_file, 'wt+') as f:
-                json.dump(f, settings_data)
-            temp_file_list.append(temp_file)
+            settings_parts.append(settings_data)
+
+    account_files = Search.match_files(
+        '**/account.json',
+        root=root_dir,
+        exclude=['*/.*/*']
+    )
+    for account_file in account_files:
+        correct, id, name = load_and_check_account(account_file)
+        if not correct:
+            continue
+        account_dir = os.path.join(os.path.dirname(account_file), 'settings')
+        logger.debug('Processing %s', account_dir)
+        setting_files = Search.match_files('*.json', root=account_dir)
+        settings_data = convert_files_to_json_object(['Settings', 'Accounts'], name, root_dir, False, setting_files)
+        settings_parts.append(settings_data)
+
+    product_files = Search.match_files(
+        '**/product.json',
+        root=root_dir,
+        exclude=['**/.*/**']
+    )
+
+    for product_file in product_files:
+        correct, id, name = load_and_check_product(product_file)
+        if not correct:
+            continue
+        product_dir = os.path.join(os.path.dirname(product_file), 'settings')
+        # Settings
+        load_product_settings(product_dir, name)
+        # Sensitive
+        load_product_sensitive(product_dir, name)
+        # Builds
+        load_product_builds(product_dir, name)
+        # asFiles
+        load_product_files(product_dir, name)
+
     # Operations
     for product_file in product_files:
-        with open(product_file, 'rt') as f:
-            product = json.load(f).get('Product', {})
-        id = product.get('Id')
-        name = product.get('Name')
-        if not name:
-            name = id
-        if e.PRODUCT and e.PRODUCT.lower() != name.lower():
+        correct, id, name = load_and_check_product(product_file)
+        if not correct:
             continue
         operations_dir = os.path.join(find_gen3_product_infrastructure_dir(root_dir, name), 'operations')
 
         # Settings
-        setting_files = Search.match_files(
-            '*',
-            exclude=(
-                '*build.json',
-                '*credentials.json',
-                '*sensitive.json',
-                '*/asfile/*',
-                '*/asFile/*',
-                '.*',
-                '*/.*/*'
-            ),
-            root=operations_dir
-        )
-        if setting_files:
-            temp_file = tempfile.mktemp('.json', 'operations_settings_', temp_dir)
-            settings_data = convert_files_to_json_object(['Settings', 'Products'], name, root_dir, False, setting_files)
-            with open(temp_file, 'wt+') as f:
-                json.dump(f, settings_data)
-            temp_file_list.append(temp_file)
+        load_product_settings(operations_dir, name)
         # Sensitive
-        setting_files = Search.match_files(
-            '*credentials.json',
-            '*sensitive.json',
-            exclude=(
-                '*/asfile/*',
-                '*/asFile/*',
-                '.*',
-                '*/.*/*'
-            ),
-            root=operations_dir
-        )
-        if setting_files:
-            temp_file = tempfile.mktemp('.json', 'operations_sensitive_', temp_dir)
-            settings_data = convert_files_to_json_object(['Sensitive', 'Products'], name, root_dir, False, setting_files) # noqa
-            with open(temp_file, 'wt+') as f:
-                json.dump(f, settings_data)
-            temp_file_list.append(temp_file)
+        load_product_sensitive(operations_dir, name)
         # asFiles
-        setting_files = Search.match_files(
-            '*/asfile/*',
-            '*/asFile/*',
-            exclude=(
-                '.*',
-                '*/.*/*'
-            ),
-            root=operations_dir
-        )
-        if setting_files:
-            temp_file = tempfile.mktemp('.json', 'operations_settings_asfile_', temp_dir)
-            settings_data = convert_files_to_json_object(['Settings', 'Products'], name, root_dir, True, setting_files)
-            with open(temp_file, 'wt+') as f:
-                json.dump(f, settings_data)
-            temp_file_list.append(temp_file)
+        load_product_files(operations_dir, name)
 
     with open(result_file, 'wt+') as f:
-        json.dump(f, utils.deep_dict_update_json_files(temp_file_list))
+        json.dump(f, utils.deep_merge_dict_list(settings_parts))
 
 
 def assemble_composite_definitions(

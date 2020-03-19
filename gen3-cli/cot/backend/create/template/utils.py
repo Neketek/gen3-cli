@@ -15,6 +15,13 @@ def deep_dict_update(a, b):
             a[b_key] = b_value
 
 
+def deep_merge_dict_list(dicts):
+    data = {}
+    for dict_ in dicts:
+        deep_dict_update(data, dict_)
+    return data
+
+
 def deep_dict_update_json_files(files):
     data = {}
     for filename in files:
