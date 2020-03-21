@@ -3,7 +3,7 @@ from cot.backend.common.fsutils import Search
 from cot.loggers import logging
 from . import context_tree as ct
 from .set_context import set_context
-from .environment import Environment
+# from .environment import Environment
 
 
 logger = logging.getLogger('CREATE_TEMPLATE')

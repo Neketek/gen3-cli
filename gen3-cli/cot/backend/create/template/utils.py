@@ -15,7 +15,7 @@ def deep_dict_update(a, b):
             a[b_key] = b_value
 
 
-def deep_merge_dict_list(dicts):
+def deep_merge_dicts_list(dicts):
     data = {}
     for dict_ in dicts:
         deep_dict_update(data, dict_)

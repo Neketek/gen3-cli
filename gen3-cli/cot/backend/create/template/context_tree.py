@@ -1223,7 +1223,7 @@ def convert_files_to_json_object(
                 processed_part = {ancestor: processed_part}
         object_parts.append(processed_part)
 
-    return utils.deep_merge_dict_list(object_parts)
+    return utils.deep_merge_dicts_list(object_parts)
 
 
 def assemble_settings(
@@ -1371,16 +1371,146 @@ def assemble_settings(
         load_product_files(operations_dir, name)
 
     with open(result_file, 'wt+') as f:
-        json.dump(f, utils.deep_merge_dict_list(settings_parts))
+        json.dump(f, utils.deep_merge_dicts_list(settings_parts))
 
 
 def assemble_composite_definitions(
     environment_obj
 ):
-    pass
+    e = environment_obj
+    definitions = []
+    # Gather the relevant definitions
+    if e.ACCOUNT:
+        pattern = os.path.join(e.ACCOUNT_INFRASTRUCTURE_DIR, 'cf', 'shared', 'defn*-definition.json')
+        definitions += Search.match_files(pattern)
+    if e.PRODUCT and e.REGION:
+        pattern = os.path.join(e.PRODUCT_INFRASTRUCTURE_DIR, 'cf', 'shared', f'defn*-{e.REGION}*-definition.json')
+        definitions += Search.match_files(pattern)
+    if e.ENVIRONMENT and e.SEGMENT and e.REGION:
+        pattern = os.path.join(e.PRODUCT_INFRASTRUCTURE_DIR, 'cf', e.ENVIRONMENT, e.SEGMENT, '*-definition.json')
+        definitions += Search.match_files(pattern)
+
+    composite_definitions_data = utils.deep_dict_update_json_files(definitions)
+    e.COMPOSITE_DEFINITIONS = os.path.join(e.CACHE_DIR, 'composite_definitions.json')
+    with open(e.COMPOSITE_DEFINITIONS, 'wt+') as f:
+        # Escape any freemarker markup
+        text = json.dumps(composite_definitions_data, indent=4).replace('${', '$\\{')
+        f.write(text)
+
+
+def stack_outputs_formatter(
+    input=None,
+    account=None,
+    region=None,
+    level=None,
+    deployment_unit=None
+):
+
+    def format_output(input):
+        if not isinstance(input, list) and any(isinstance(item, dict) and 'OutputKey' in item for item in input):
+            return
+        for key, value in {
+            'Account': account,
+            'Region': region,
+            'Level': level,
+            'DeploymentUnit': deployment_unit
+        }.items():
+            item = {
+                'key': key,
+                'value': value
+            }
+            if item not in input:
+                input.append(item)
+
+    def walk(input):
+        if isinstance(input, dict):
+            for key, item in input.items():
+                walk(item)
+        elif isinstance(input, list):
+            for item in input:
+                walk(item)
+            format_output(item)
+
+    return input
+
+
+def add_standard_pairs_to_stack(
+    account='',
+    region='',
+    level='',
+    deployment_unit='',
+    input=None
+):
+    return stack_outputs_formatter(
+        account=account,
+        region=region,
+        level=level,
+        deployment_unit=deployment_unit,
+        input=input
+    )
+    # **************************************************
+    # I'm not sure about the purpose of file override
+    # Therefore, I'll not do it, just because I don't see the reason
+    # **************************************************
+    # if [[ ${return_status} -eq 0 ]]; then
+    #   # Copy/overwrite the output
+    #   [[ -n "${output_file}" ]] && \
+    #     cp "${result_file}" "${output_file}" ||
+    #     cp "${result_file}" "${input_file}"; return_status=$?
+    # fi
 
 
 def assemble_composite_stack_outputs(
     environment_obj
 ):
-    pass
+    e = environment_obj
+    stacks = []
+    if e.ACCOUNT:
+        pattern = os.path.join(e.ACCOUNT_INFRASTRUCTURE_DIR, 'cf', 'shared', 'acc*-stack.json')
+        stacks += Search.match_dirs(pattern)
+    if e.PRODUCT and e.REGION:
+        pattern = os.path.join(e.PRODUCT_INFRASTRUCTURE_DIR, 'cf', 'shared', f'product*-{e.REGION}*-stack.json')
+        stacks += Search.match_files(pattern)
+    if e.ENVIRONMENT and e.SEGMENT and e.REGION:
+        pattern = os.path.join(e.PRODUCT_INFRASTRUCTURE_DIR, 'cf', e.ENVIRONMENT, e.SEGMENT, '*-stack.json')
+        stacks += Search.match_files(pattern)
+
+    e.COMPOSITE_STACK_OUTPUTS = os.path.join(e.CACHE_DIR, 'composite_stack_outputs.json')
+    if stacks:
+        # Add default account, region, stack level and deployment unit
+        modified_stacks = []
+        for stack in stacks:
+            # Annotate as necessary
+            parsed_stack_filename = parse_stack_filename(stack)
+            with open(stack, 'rt') as f:
+                stack_data = json.load(f)
+            if any(parsed_stack_filename.items()):
+                modified_stack_data = add_standard_pairs_to_stack(
+                    stack_account=parsed_stack_filename['stack_account'] or e.AWSID,
+                    stack_region=parsed_stack_filename['stack_region'],
+                    stack_level=parsed_stack_filename['stack_level'],
+                    stack_deployment_unit=parsed_stack_filename['stack_deployment_unit'],
+                    input=stack_data
+                )
+                modified_stacks.append(modified_stack_data)
+            else:
+                with open(stack, 'rt') as f:
+                    stack_data = json.load(f)
+                    modified_stacks.append(stack_data)
+        composite_outputs = []
+        for stacks in modified_stacks:
+            for stack in stacks.get('Stacks', ()):
+                outputs = stack.get('Outputs')
+                if outputs:
+                    composite_outputs.append(outputs)
+        # TODO(rossmurr4y): Make this logic provider independant - based on details specified elsewhere in the plugin.
+        # if composite outputs is found empty, re-filter with Azure formatted outputs
+        if not composite_outputs:
+            for stack in modified_stacks:
+                outputs = stack.get('properties', {}).get('outputs')
+                if not outputs:
+                    composite_outputs.append(outputs)
+    else:
+        composite_outputs = []
+    with open(e.COMPOSITE_STACK_OUTPUTS, 'wt+') as f:
+        json.dump(f, composite_outputs)
