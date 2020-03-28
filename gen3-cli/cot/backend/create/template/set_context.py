@@ -24,9 +24,6 @@ def set_context(
     e.GENERATION_CONTEXT_DEFINED = True
     l.GENERATION_CONTEXT_DEFINED_LOCAL = True
     if not e.GENERATION_TMPDIR:
-        # *******************************************
-        # * TODO: decide how to do temp dir cleanup *
-        # *******************************************
         e.GENERATION_TMPDIR = tempfile.mkdtemp()
     e.GENERATION_DATA_DIR = find_gen3_root_dir(cwd)
     if not e.GENERATION_DATA_DIR:

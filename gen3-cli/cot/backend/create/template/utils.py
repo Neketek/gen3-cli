@@ -156,3 +156,13 @@ def add_json_ancestor_objects(filename, ancestors):
         else:
             result = {ancestor: result}
     return result
+
+
+def get_tasks_from_contract(contract_file):
+    with open(contract_file, 'rt') as f:
+        contract = json.load(f)
+    tasks = []
+    for stage in contract['Stages']:
+        for step in stage['Steps']:
+            tasks.append((step['Type'], step['Parameters']))
+    return tasks

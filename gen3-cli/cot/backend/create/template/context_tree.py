@@ -12,6 +12,38 @@ from cot.backend.common.fsutils import Search
 logger = logging.getLogger('CONTEXT_TREE')
 
 
+def get_unit_cf_dir(
+    base_dir="",
+    level="",
+    unit="",
+    placement="",
+    region=""
+):
+    # Check for legacy files that don't contain the deployment unit
+    if level == 'account':
+        if unit == 's3' and os.path.isfile(os.path.join(base_dir, f'account-{region}-template.json')):
+            return base_dir
+    elif level == 'product':
+        if unit == 'cmk' and os.path.isfile(os.path.jsoin(base_dir, f'product-{region}-template.json')):
+            return base_dir
+    elif level == 'solution':
+        if os.path.isfile(os.path.join(base_dir, f'solution-{region}-template.json')):
+            return base_dir
+    elif level == 'segment':
+        match = re.match(r'cmk|cert|dns', unit)
+        if match and os.path.isfile(os.path.join(base_dir, f'container-{region}-template.json')):
+            return base_dir
+        if (
+            unit == 'cmk'
+            and (
+                os.path.isfile(os.path.join(base_dir, f'seg-key-{region}-template.json'))
+                or os.path.isfile(os.path.join(base_dir, f'cont-key-{region}-template.json'))
+            )
+        ):
+            return base_dir
+    return format_unit_cf_dir(base_dir, level, unit, placement, region)
+
+
 def format_unit_cf_dir(base_dir, level, unit, placement, region):
     # Determine placement by region if not explicitly provided
     if not placement:
