@@ -1,8 +1,10 @@
 import os
+import json
 import re
 import shutil
 import enum
 import uuid
+import subprocess
 import tempfile
 from cot.backend.common.fsutils import Search
 from cot.loggers import logging
@@ -10,6 +12,7 @@ from . import context_tree as ct
 from .set_context import set_context
 from .environment import Environment
 from . import utils
+from . import freemarker
 
 
 logger = logging.getLogger('CREATE_TEMPLATE')
@@ -181,6 +184,8 @@ def process_template_pass(
     cf_dir='',
     run_id=''
 ):
+    results_list = ()
+
     e = environment_obj
     # Filename parts
     level_prefix = f'{level}-'
@@ -375,7 +380,10 @@ def process_template_pass(
     )
     if pass_deployment_unit_subset[pass_]:
         args += ['-v', f'deploymentUnitSubset={deployment_unit_subset[pass_]}']
+
     file_description = pass_description[pass_]
+    logger.info('Generating %s file...', file_description)
+
     if pass_alternative == 'primary':
         pass_alternative = ''
     pass_alternative_prefix = ''
@@ -394,9 +402,134 @@ def process_template_pass(
     output_file = os.path.join(cf_dir, output_filename)
     result_file = os.path.join(results_dir, output_filename)
 
-    logger.info('Generating %s file...', file_description)
-    results_list = ()
-    return PassResult.DIFFERENCES_DETECTED, results_list
+    args += ['-d', template_dir]
+    if e.GENERATION_PRE_PLUGIN_DIRS:
+        args += ['-d', e.GENERATION_PRE_PLUGIN_DIRS]
+    args += ['-d', os.path.join(e.GENERATION_BASE_DIR, 'engine')]
+    args += ['-d', os.path.join(e.GENERATION_BASE_DIR, 'providers')]
+    if e.GENERATION_PLUGIN_DIRS:
+        args += ['-d', e.GENERATION_PLUGIN_DIRS]
+    args += ['-t', template]
+    args += ['-o', template_result_file]
+    # this is the only place where shell wrapper is used
+    # in fact we don't need any template engine at all
+    # because we can use pure python json capabilities that are much
+    # better compared to freemarker
+    if freemarker.run(e, *args) != 0:
+        return PassResult.ERROR
+    # Ignore whitespace only files
+    with open(template_result_file, 'rt') as f:
+        if not re.search(r'\S+', f.read()):
+            if os.path.isfile(output_file):
+                os.path.remove(output_file)
+            return PassResult.IGNORED
+
+    # Check for fatal strings in the output
+    with open(template_result_file, 'rt') as f:
+        template_result_str_data = f.read()
+        if re.search('COTFatal:', template_result_str_data):
+            name, ext = os.path.splitext(template_result_file)
+            if ext == 'json':
+                logger.error(json.dumps(json.loads(template_result_str_data), indent=4))
+            else:
+                logger.error(template_result_str_data)
+            return PassResult.ERROR
+    name, ext = os.path.splitext(template_result_file)
+
+    def remove_whitespaces(s):
+        s = re.sub(r'^ *', '', s)
+        s = re.sub(r' *$', '', s)
+        s = re.sub(r'^$', '', s)
+        s = re.sub(r'^\s*$', '', s)
+        return s
+
+    if ext == 'sh':
+        # Detect any exceptions during generation
+        with open(template_result_file, 'rt') as f:
+            template_result_str_data = f.read()
+        if re.search(r'\[fatal \]', template_result_str_data):
+            logger.fatal('Exceptions occurred during script generation. Details follow...')
+            logger.error(template_result_str_data)
+            return PassResult.ERROR
+        with open(result_file, 'wt+') as f:
+            result_file.write(remove_whitespaces(template_result_str_data))
+        results_list.append(output_file)
+        if not os.path.isfile(output_file):
+            # First generation
+            differences_detected = True
+        else:
+            modifications = []
+            with open(output_file, 'rt') as f:
+                output_file_str_data = f.read()
+            try:
+                existing_request_reference = re.search("#--COT-RequestReference=(.*)$", output_file_str_data).group(1)
+            except AttributeError:
+                modifications.append(lambda s: re.sub(existing_request_reference, '', s))
+            try:
+                existing_configuration_reference = re.search(
+                    "#--COT-ConfigurationReference=(.*)$",
+                    output_file_str_data
+                ).group(1)
+                modifications.append(lambda s: re.sub(existing_configuration_reference, '', s))
+            except AttributeError:
+                pass
+            if e.TREAT_RUN_ID_DIFFERENCES_AS_SIGNIFICANT != 'true':
+                modifications.append(lambda s: re.sub(run_id, '', s))
+                try:
+                    existing_run_id = re.search("#--COT-RunId=(.*)$", output_file_str_data).group(1)
+                    modifications.append(lambda s: re.sub(existing_run_id, '', s))
+                except AttributeError:
+                    pass
+            output_file_str_data = remove_whitespaces(output_file_str_data)
+            for modification in modifications:
+                output_file_str_data = modification(output_file_str_data)
+                template_result_str_data = modification(template_result_str_data)
+            if output_file_str_data == template_result_str_data:
+                logger.info('No change in %s detected...', file_description)
+            else:
+                differences_detected = True
+        if pass_ == 'pregeneration':
+            logger.info('Processing pregeneration script...')
+            if differences_detected:
+                subprocess.run(result_file)
+            else:
+                subprocess.run(output_file)
+            utils.assemble_composite_definitions(environment_obj)
+        # Capture the result
+    elif ext == 'json':
+        with open(output_file) as f:
+            output_file_data = json.load(f)
+        with open(template_result_file) as f:
+            template_result_data = json.load(f)
+
+        if output_file_data.get('REQUEST_REFERENCE', ''):
+            output_file_data['REQUEST_REFERENCE'] = ''
+            template_result_data['REQUEST_REFERENCE'] = ''
+
+        if output_file_data.get('CONFIGURATION_REFERENCE', ''):
+            output_file_data['CONFIGURATION_REFERENCE'] = ''
+            template_result_data['CONFIGURATION_REFERENCE'] = ''
+
+        if e.TREAT_RUN_ID_DIFFERENCES_AS_SIGNIFICANT != 'true':
+            if output_file.get('RUN_ID', ''):
+                output_file_data['RUN_ID'] = ''
+                template_result_data['RUN_ID'] = ''
+
+        # Ignore if only the metadata/timestamps have changed
+        try:
+            del output_file_data['Metadata']
+        except KeyError:
+            pass
+        try:
+            del template_result_data['Metadata']
+        except KeyError:
+            pass
+        if template_result_data == output_file_data:
+            logger.info('No change in %s detected...', file_description)
+        else:
+            differences_detected = True
+
+    return PassResult.DIFFERENCES_DETECTED if differences_detected else PassResult.NO_CHANGE, results_list
 
 
 def process_template(
@@ -414,8 +547,8 @@ def process_template(
 ):
     e = environment_obj
     # Defaults
-    passes = ['template']
-    template_alternatives = ['primary']
+    # passes = ['template']
+    # template_alternatives = ['primary']
     if level in ('unitlist', 'blueprint', 'buildblueprint'):
         cf_dir_default = os.path.join(e.PRODUCT_STATE_DIR, 'cot', e.ENVIRONMENT, e.SEGMENT)
     elif level == 'account':
